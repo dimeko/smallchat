@@ -37,7 +37,7 @@ func (h *Hub) run() {
 			}
 		case message := <-h.broadcast:
 			for client := range h.clients {
-				if shouldSend(client, message) {
+				if send_to_client(client, message) {
 					select {
 					case client.send <- message:
 						var p OutgoingMessage
@@ -51,14 +51,13 @@ func (h *Hub) run() {
 						close(client.send)
 						delete(h.clients, client)
 					}
-
 				}
 			}
 		}
 	}
 }
 
-func shouldSend(client *Client, message []byte) bool {
+func send_to_client(client *Client, message []byte) bool {
 	var p OutgoingMessage
 	err := json.Unmarshal(message, &p)
 	if err != nil || p.Payload.Id == "" || p.Type == 102 {

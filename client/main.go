@@ -36,11 +36,66 @@ type MsgSchema struct {
 	Payload Payload `json:"payload"`
 }
 
-func PKCS5UnPadding(src []byte) []byte {
-	length := len(src)
-	unpadding := int(src[length-1])
+func padding(m []byte) []byte {
+	l := len(m)
+	return m[:(l - int(m[l-1]))]
+}
 
-	return src[:(length - unpadding)]
+// -------------------------------------------------------------------------------- //
+
+func send_message(w *websocket.Conn, m MsgSchema) error {
+	b, error := json.Marshal(m)
+	if error != nil {
+		log.Println("Marshalling error\n")
+	}
+
+	err := w.WriteMessage(websocket.TextMessage, b)
+	if err != nil {
+		log.Println("write:", err)
+		return err
+	}
+	return nil
+}
+
+// -------------------------------------------------------------------------------- //
+
+func encrypt(input_message string, peer string, aes_iv string) (string, error) {
+	length := len(input_message)
+	var plainTextBlock []byte
+
+	if length%16 != 0 {
+		extendBlock := 16 - (length % 16)
+		plainTextBlock = make([]byte, length+extendBlock)
+		copy(plainTextBlock[length:], bytes.Repeat([]byte{uint8(extendBlock)}, extendBlock))
+	} else {
+		plainTextBlock = make([]byte, length)
+	}
+
+	copy(plainTextBlock, input_message)
+	enc_outgoing_msg := make([]byte, len(plainTextBlock))
+	
+	block, err := aes.NewCipher([]byte(peer))
+	if err != nil {
+		return "", err
+	}
+	mode := cipher.NewCBCEncrypter(block, []byte(aes_iv))
+	mode.CryptBlocks(enc_outgoing_msg, plainTextBlock)
+	return base64.StdEncoding.EncodeToString(enc_outgoing_msg), nil
+}
+
+// -------------------------------------------------------------------------------- //
+
+func decrypt(key string, sender string, message string, aes_iv string) (string, error) {
+	block, err := aes.NewCipher([]byte(key))
+	if err != nil {
+		fmt.Printf("Could not decrypt message for sender: %s", sender)
+		return "", err
+	}
+	enc_incoming_msg := []byte(message)
+	ctext, err := base64.StdEncoding.DecodeString(string(enc_incoming_msg))
+	mode := cipher.NewCBCDecrypter(block, []byte(aes_iv))
+	mode.CryptBlocks(ctext, ctext)
+	return string(padding(ctext)), nil
 }
 
 func main() {
@@ -61,18 +116,21 @@ func main() {
 	var set_peer int
 	var set_peer_id string
 	var input_message string
+
+	// Map of clieint_uuid: aes_cipher 
 	available_clients := make(map[string]string)
 
 	kv_pair, err := ecdh.GenerateKey()
 	if err != nil {
-		fmt.Println("Could not initialize dh keys")
+		fmt.Println("Could not initialize Diffie-Helman keys")
 		log.Fatal()
 	}
+	// Key pair for Diffie-Helman algorithm
 	_, pub_key := kv_pair.Marshal() 
 
-
-	aes_iv := "my16digitIvKey12"
-
+	// The AES initialization vector
+	aes_iv := "16bytetIniVKey12"
+	// Current client's uuid returned from the server
   my_uuid := ""
 
 	go func() {
@@ -90,7 +148,7 @@ func main() {
 					
 				if err != nil {	
 					log.Fatalf("Error response from server")
-					return
+					continue
 				}
 	
 				if inc_msg.Type == 101 {
@@ -99,17 +157,10 @@ func main() {
 					}
 
 					m := MsgSchema{Type: 102, Key: []byte(pub_key), Sender: my_uuid, Payload: Payload{Id: "", Message: ""},}
-					b, error := json.Marshal(m)
-					if error != nil {
-						log.Println("Marshalling error\n")
-					}
-	
-					err = c.WriteMessage(websocket.TextMessage, b)
+					err = send_message(c, m)
 					if err != nil {
-						log.Println("write:", err)
-						return
+						continue
 					}
-
 				} else if inc_msg.Type == 102 {
 						incomig_pub_key, err := ecdh.UnmarshalPublic(string(inc_msg.Key))
 						if err != nil {
@@ -123,19 +174,10 @@ func main() {
 						}
 						available_clients[inc_msg.Sender] = shared_secret.Secret
 				} else {
-					block, err := aes.NewCipher([]byte(available_clients[inc_msg.Sender]))
-					if err != nil {
-						fmt.Printf("Could not decrypt message for sender: %s", inc_msg.Sender)
-						continue
-					}
-					enc_incoming_msg := []byte(inc_msg.Payload.Message)
-					ctext, err := base64.StdEncoding.DecodeString(string(enc_incoming_msg))
+					ctext, err := decrypt(available_clients[inc_msg.Sender], inc_msg.Sender, inc_msg.Payload.Message, aes_iv)
 					if err != nil {
 						continue
 					}
-					mode := cipher.NewCBCDecrypter(block, []byte(aes_iv))
-					mode.CryptBlocks(ctext, ctext)
-					ctext = PKCS5UnPadding(ctext)
 					fmt.Printf("From: %s --------------> incoming message: %s\n",inc_msg.Sender, string(ctext))
 				}
 				fmt.Printf("\n")
@@ -179,43 +221,19 @@ func main() {
 				input_message, err = in.ReadString('\n')
 				
 				set_peer_id = strings.ToLower(set_peer_id)
-				input_message = strings.ToLower(input_message)
 
-				length := len(input_message)
-				var plainTextBlock []byte
-
-				if length%16 != 0 {
-					extendBlock := 16 - (length % 16)
-					plainTextBlock = make([]byte, length+extendBlock)
-					copy(plainTextBlock[length:], bytes.Repeat([]byte{uint8(extendBlock)}, extendBlock))
-				} else {
-					plainTextBlock = make([]byte, length)
+				prepared_string, err := encrypt(input_message, peers_list[set_peer], aes_iv)
+				if err != nil {
+					fmt.Println("Could not encrypt message. Sending blank")
 				}
-			
-				copy(plainTextBlock, input_message)
-				enc_outgoing_msg := make([]byte, len(plainTextBlock))
-				
-				block, err := aes.NewCipher([]byte(peers_list[set_peer]))
-				mode := cipher.NewCBCEncrypter(block, []byte(aes_iv))
-				mode.CryptBlocks(enc_outgoing_msg, plainTextBlock)
-				prepared_string := base64.StdEncoding.EncodeToString(enc_outgoing_msg)
 
 				m := MsgSchema{Type: 100, Key: []byte(pub_key), Sender: my_uuid, Payload: Payload{Id: set_peer_id, Message: prepared_string},}
-				b, error := json.Marshal(m)
-				if error != nil {
-					log.Println("Marshalling error\n")
-				}
-
-				err = c.WriteMessage(websocket.TextMessage, b)
+				err = send_message(c,m)
 				if err != nil {
-					log.Println("write:", err)
-					return
+					fmt.Println("Error sending message. Please re-run the client")
+					close_program <- true
 				}
 
-				if strings.HasPrefix(string(b), "bye") {
-				   fmt.Println("Good bye!")
-				   close_program <- true
-				}
 			}
 		}
 	}()
