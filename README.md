@@ -1,5 +1,4 @@
 #### End-2-end encryption with Diffie-Hellman
-
 Run:
 ```bash
 make run-server
